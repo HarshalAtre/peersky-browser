@@ -1,19 +1,16 @@
-import { Readable } from "stream";
 import mime from "mime-types";
-import path from "path";
 import { directoryListingHtml } from "./helia/directoryListingTemplate.js";
 import { createNode } from "./helia/helia.js";
-import { unixfs, globSource } from "@helia/unixfs";
+import { unixfs } from "@helia/unixfs";
 import { ipns } from "@helia/ipns";
 import { dnsLink } from "@helia/dnslink";
-import fs from "fs-extra";
 import contentHash from "content-hash";
 import { CID } from "multiformats/cid";
 import { base32 } from "multiformats/bases/base32";
 import { base36 } from "multiformats/bases/base36";
 import { base58btc } from "multiformats/bases/base58";
 import { peerIdFromString, peerIdFromCID } from "@libp2p/peer-id";
-import { ensCache, saveEnsCache, RPC_URL, ipfsOptions } from "./config.js";
+import { ensCache, saveEnsCache, RPC_URL } from "./config.js";
 import { JsonRpcProvider } from "ethers";
 
 // Create a combined multibase decoder to handle base32, base36, and base58btc
@@ -40,8 +37,20 @@ function getPeerIdFromString(peerIdString) {
   return peerIdFromCID(CID.parse(peerIdString, multibaseDecoder));
 }
 
-export async function createHandler(ipfsOptions, session) {
+export async function createHandler(ipfsOptions) {
   let node, unixFileSystem, name, dnsLinkResolver;
+
+  function buildResponse(statusCode, headers, body = "") {
+    return new Response(body, {
+      status: statusCode,
+      headers,
+    });
+  }
+
+  function normalizeUploadPath(filePath) {
+    const normalized = String(filePath || "index.html").replace(/\\/g, "/");
+    return normalized.replace(/^\/+/, "") || "index.html";
+  }
 
   async function initializeIPFSNode() {
     console.log("Initializing IPFS node...");
@@ -59,66 +68,36 @@ export async function createHandler(ipfsOptions, session) {
   const provider = new JsonRpcProvider(RPC_URL);
 
   // Function to handle file and directory uploads
-  async function handleFileUpload(request, sendResponse) {
+  async function handleFileUpload(request) {
     try {
       const startTime = Date.now();
       const entries = [];
-      let currentFileName = null;
-      
-      for (const data of request.uploadData || []) {
-        console.log("Upload data entry:", JSON.stringify(Object.keys(data)), "type:", data.type);
-        
-        if (data.type === "file" && data.file) {
-          const filePath = data.file;
-          const stats = await fs.stat(filePath);
-          if (stats.isDirectory()) {
-            // Handle directory with globSource for recursive upload
-            const source = globSource(filePath, '**/*');
-            for await (const entry of source) {
-              entries.push({
-                path: entry.path,
-                content: entry.content, // Readable stream for file content
-              });
-            }
-          } else {
-            // Handle individual file
-            const fileName = path.basename(filePath);
-            entries.push({
-              path: fileName,
-              content: fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
-            });
-          }
-        } else if (data.type === "rawData" && data.bytes) {
-          // This contains the FormData field name/filename metadata
-          // Parse the rawData to extract the filename
-          const rawDataString = Buffer.from(data.bytes).toString('utf-8');
-          console.log("Raw data string:", rawDataString);
-          
-          // Extract filename from Content-Disposition header in the rawData
-          const filenameMatch = rawDataString.match(/filename="([^"]+)"/);
-          if (filenameMatch) {
-            currentFileName = filenameMatch[1];
-            console.log("Extracted filename from rawData:", currentFileName);
-          }
-        } else if (data.type === "blob" && data.blobUUID) {
-          // Handle blob data from FormData - use the filename from previous rawData entry
-          const blobData = await session.getBlobData(data.blobUUID);
-          const fileName = currentFileName || "index.html";
-          console.log("Processing blob with filename:", fileName, "blobUUID:", data.blobUUID);
-          entries.push({ path: fileName, content: blobData });
-          currentFileName = null; // Reset for next file
+      const contentType = request.headers.get("content-type") || "";
+
+      if (contentType.includes("multipart/form-data")) {
+        const formData = await request.formData();
+        for (const [fieldName, value] of formData.entries()) {
+          if (typeof value === "string") continue;
+          const fileName = normalizeUploadPath(value.name || fieldName || "index.html");
+          const fileBuffer = Buffer.from(await value.arrayBuffer());
+          entries.push({ path: fileName, content: fileBuffer });
+        }
+      } else {
+        const fileBuffer = Buffer.from(await request.arrayBuffer());
+        if (fileBuffer.length > 0) {
+          entries.push({ path: "index.html", content: fileBuffer });
         }
       }
   
       if (entries.length === 0) {
-        throw new Error("No files found in the upload data.");
+        throw new Error("No files found in request body.");
       }
   
       // Use addAll to upload files with paths, wrapping with a directory
-      const options = { wrapWithDirectory: true };
+      const addAllOptions = { wrapWithDirectory: true };
       let rootCid;
   
-      for await (const result of unixFileSystem.addAll(entries, options)) {
+      for await (const result of unixFileSystem.addAll(entries, addAllOptions)) {
         console.log("Added:", result.path, result.cid.toString());
         rootCid = result.cid;
       }
@@ -130,35 +109,31 @@ export async function createHandler(ipfsOptions, session) {
   
       const fileUrl = `ipfs://${rootCid.toString()}/`;
   
-      // Send response immediately after pinning
-      sendResponse({
-        statusCode: 200,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          Location: fileUrl,
-          "Content-Type": "text/plain",
-        },
-        data: Readable.from(Buffer.from(fileUrl)),
-      });
+      const response = buildResponse(200, {
+        "Access-Control-Allow-Origin": "*",
+        Location: fileUrl,
+        "Content-Type": "text/plain",
+      }, fileUrl);
 
+      // Return to caller before background provide (fire-and-forget).
       const peerCount = node.libp2p.getPeers().length;
       console.log(`Providing ${rootCid} with ${peerCount} peers connected`);
-  
+
       // Provide the root CID to the DHT in the background
       node.libp2p.contentRouting.provide(rootCid).then(() => {
         console.log(`Provided ${rootCid} to DHT in ${Date.now() - startTime}ms`);
       }).catch(err => {
         console.log('Error providing to DHT (non-critical):', err.message);
       });
-  
+
       console.log("Files uploaded with root CID:", rootCid.toString());
+      return response;
     } catch (e) {
       console.error("Error uploading file:", e);
-      sendResponse({
-        statusCode: 500,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        data: Readable.from(Buffer.from(e.stack)),
-      });
+      return buildResponse(500, {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/plain",
+      }, e?.stack || String(e));
     }
   }
 
@@ -275,26 +250,22 @@ export async function createHandler(ipfsOptions, session) {
     }
   }
 
-  return async function protocolHandler(request, sendResponse) {
-    const { url, method, uploadData, headers } = request;
+  return async function protocolHandler(request) {
+    const { url, method } = request;
 
     if (!node) {
       console.log("IPFS node is not ready yet");
-      return;
+      return buildResponse(503, { "Content-Type": "text/plain" }, "IPFS node is not ready yet");
     }
 
     // Handle file uploads for ipfs:// URLs
-    if (
-      (method === "PUT" || method === "POST") &&
-      uploadData &&
-      url.startsWith("ipfs://")
-    ) {
+    if ((method === "PUT" || method === "POST") && url.startsWith("ipfs://")) {
       console.log(`Handling file upload for URL: ${url}`);
-      return handleFileUpload({ uploadData, headers }, sendResponse);
+      return handleFileUpload(request);
     }
 
     let ipfsPath;
-    let data = null;
+    let data = "";
     let statusCode = 200;
     let responseHeaders = {
       "Access-Control-Allow-Origin": "*",
@@ -318,10 +289,7 @@ export async function createHandler(ipfsOptions, session) {
           throw new Error("Invalid URL format even after prepending http://");
         }
       } else {
-        statusCode = 400;
-        data = Readable.from([Buffer.from("Invalid URL: " + url)]);
-        sendResponse({ statusCode, headers: responseHeaders, data });
-        return;
+        return buildResponse(400, responseHeaders, `Invalid URL: ${url}`);
       }
     }
 
@@ -329,8 +297,9 @@ export async function createHandler(ipfsOptions, session) {
       // ENS resolution with caching
       try {
         const resolver = await provider.getResolver(ensName);
-        if (!resolver)
+        if (!resolver) {
           throw new Error("No resolver found for ENS name " + ensName);
+        }
 
         let contentHashRaw;
         if (ensCache.has(ensName)) {
@@ -393,12 +362,7 @@ export async function createHandler(ipfsOptions, session) {
         }
       } catch (e) {
         console.error("Error resolving ENS name:", e);
-        statusCode = 500;
-        data = Readable.from([
-          Buffer.from("Failed to resolve ENS name: " + e.toString()),
-        ]);
-        sendResponse({ statusCode, headers: responseHeaders, data });
-        return;
+        return buildResponse(500, responseHeaders, `Failed to resolve ENS name: ${e.toString()}`);
       }
     } else if (urlObj.protocol === "ipns:") {
       // IPNS URL
@@ -416,12 +380,7 @@ export async function createHandler(ipfsOptions, session) {
         ipfsPath = await handleIPNSResolution(ipnsName, urlParts);
       } catch (e) {
         console.log("Error resolving IPNS:", e);
-        statusCode = 500;
-        data = Readable.from([
-          Buffer.from("Failed to resolve IPNS name: " + e.toString()),
-        ]);
-        sendResponse({ statusCode, headers: responseHeaders, data });
-        return;
+        return buildResponse(500, responseHeaders, `Failed to resolve IPNS name: ${e.toString()}`);
       }
     } else {
       // IPFS URL
@@ -434,10 +393,7 @@ export async function createHandler(ipfsOptions, session) {
         ipfsPath = [cid, ...pathSegments];
       } catch (e) {
         console.error("Error parsing IPFS CID:", e);
-        statusCode = 400;
-        data = Readable.from([Buffer.from("Invalid CID in URL.")]);
-        sendResponse({ statusCode, headers: responseHeaders, data });
-        return;
+        return buildResponse(400, responseHeaders, "Invalid CID in URL.");
       }
     }
 
@@ -471,7 +427,7 @@ export async function createHandler(ipfsOptions, session) {
             indexStream.push(chunk);
           }
           responseHeaders["Content-Type"] = "text/html";
-          data = Readable.from(Buffer.concat(indexStream));
+          data = Buffer.concat(indexStream);
         } catch (err) {
           // Otherwise, generate a directory listing
           const files = [];
@@ -486,7 +442,7 @@ export async function createHandler(ipfsOptions, session) {
           }
           const html = directoryListingHtml(pathString, files.join("\n"));
           responseHeaders["Content-Type"] = "text/html";
-          data = Readable.from([Buffer.from(html)]);
+          data = html;
         }
       } else {
         // File => read and sniff MIME. If the path has no extension or "application/octet-stream",
@@ -516,7 +472,7 @@ export async function createHandler(ipfsOptions, session) {
         }
 
         responseHeaders["Content-Type"] = contentType;
-        data = Readable.from(fileBuffer);
+        data = fileBuffer;
       }
     } catch (e) {
       console.error("Error retrieving file:", e);
@@ -539,7 +495,7 @@ export async function createHandler(ipfsOptions, session) {
             `Serving index.html for path: ${cid.toString()}/${indexPathString}`
           );
           responseHeaders["Content-Type"] = "text/html";
-          data = Readable.from(Buffer.concat(indexStream));
+          data = Buffer.concat(indexStream);
         } catch (indexErr) {
           console.log("No index.html found. Attempting directory listing.");
 
@@ -571,15 +527,15 @@ export async function createHandler(ipfsOptions, session) {
             `Serving directory listing for path: ${ipfsPath.join("/")}`
           );
           responseHeaders["Content-Type"] = "text/html";
-          data = Readable.from([Buffer.from(html)]);
+          data = html;
         }
       } else {
         // Handle other errors
         statusCode = 500;
-        data = Readable.from([Buffer.from(e.stack)]);
+        data = e?.stack || String(e);
       }
     }
 
-    sendResponse({ statusCode, headers: responseHeaders, data });
+    return buildResponse(statusCode, responseHeaders, data);
   };
 }
