@@ -218,7 +218,8 @@
     "include": [
       "src/protocols/hyper-handler.js",
       "src/protocols/ipfs-handler.js",
-      "src/protocols/hs-handler.js"
+      "src/protocols/hs-handler.js",
+      "src/protocols/bittorrent-handler.js"
     ],
     "exclude": [
       "test/**",

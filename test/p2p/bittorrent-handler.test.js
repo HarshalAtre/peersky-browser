@@ -92,12 +92,33 @@ function apiQuery(parts) {
 describe("BitTorrent protocol handler", function () {
   this.timeout(20000);
 
-  afterEach(() => sinon.restore());
+  /** Dirs created by loadHandler when caller does not pass userDataDir / downloadsDir */
+  const tmpDirs = [];
+
+  afterEach(function () {
+    sinon.restore();
+    while (tmpDirs.length) {
+      const d = tmpDirs.pop();
+      try {
+        fs.rmSync(d, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
 
   async function loadHandler(opts = {}) {
     const { userDataDir, downloadsDir, replyAs } = opts;
-    const ud = userDataDir || fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-ud-"));
-    const dd = downloadsDir || fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-dl-"));
+    let ud = userDataDir;
+    let dd = downloadsDir;
+    if (!ud) {
+      ud = fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-ud-"));
+      tmpDirs.push(ud);
+    }
+    if (!dd) {
+      dd = fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-dl-"));
+      tmpDirs.push(dd);
+    }
     const fork = sinon.stub();
 
     // strict so ../settings-manager.js is not merged with the real module (pulls permissions → electron).
