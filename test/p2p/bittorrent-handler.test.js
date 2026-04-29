@@ -201,14 +201,14 @@ describe("BitTorrent protocol handler", function () {
     expect(token).to.be.a("string");
 
     const start = apiQuery({ api: "start", magnet: encodeURIComponent(MAGNET) });
-    expect((await handler(new Request(start, { method: "POST" }))).status).to.equal(403);
+    expect((await handler(new Request(start, { method: "POST", headers: { "X-BT-Token": "invalid" } }))).status).to.equal(403);
     expect(child.send.callCount).to.equal(0);
 
     const bad = `${start}&token=${"0".repeat(48)}`;
-    expect((await handler(new Request(bad, { method: "POST" }))).status).to.equal(403);
+    expect((await handler(new Request(bad, { method: "POST", headers: { "X-BT-Token": "0".repeat(48) } }))).status).to.equal(403);
 
-    const pause = apiQuery({ api: "pause", hash: HASH_HEX, token });
-    const res = await handler(new Request(pause, { method: "POST" }));
+    const pause = apiQuery({ api: "pause", hash: HASH_HEX });
+    const res = await handler(new Request(pause, { method: "POST", headers: { "X-BT-Token": token } }));
     expect(res.status).to.equal(200);
     const body = await jsonBody(res);
     expect(body).to.include({ success: true, paused: true });
@@ -279,8 +279,8 @@ describe("BitTorrent protocol handler", function () {
     const tokenBody = await jsonBody(tokenRes);
     expect(tokenBody.token).to.be.a("string").with.lengthOf(48);
 
-    const start = apiQuery({ api: "start", magnet: encodeURIComponent(MAGNET), token: tokenBody.token });
-    const startRes = await handler(new Request(start, { method: "POST" }));
+    const start = apiQuery({ api: "start", magnet: encodeURIComponent(MAGNET) });
+    const startRes = await handler(new Request(start, { method: "POST", headers: { "X-BT-Token": tokenBody.token } }));
     expect(startRes.status).to.equal(200);
   });
 
@@ -288,8 +288,8 @@ describe("BitTorrent protocol handler", function () {
     const { handler, child } = await loadHandler();
     const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
     const magnet = `${MAGNET}&tr=${encodeURIComponent("udp://tracker.example.com:6969/announce")}`;
-    const url = apiQuery({ api: "start", magnet: encodeURIComponent(magnet), token });
-    const res = await handler(new Request(url, { method: "POST" }));
+    const url = apiQuery({ api: "start", magnet: encodeURIComponent(magnet) });
+    const res = await handler(new Request(url, { method: "POST", headers: { "X-BT-Token": token } }));
     expect(res.status).to.equal(200);
     const body = await jsonBody(res);
     expect(body.success).to.equal(true);
@@ -303,8 +303,8 @@ describe("BitTorrent protocol handler", function () {
   it("seed hits the worker with action seed", async () => {
     const { handler, child } = await loadHandler();
     const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
-    const url = apiQuery({ api: "seed", magnet: encodeURIComponent(MAGNET), hash: HASH_HEX, token });
-    const res = await handler(new Request(url, { method: "POST" }));
+    const url = apiQuery({ api: "seed", magnet: encodeURIComponent(MAGNET), hash: HASH_HEX });
+    const res = await handler(new Request(url, { method: "POST", headers: { "X-BT-Token": token } }));
     expect(res.status).to.equal(200);
     expect((await jsonBody(res)).mode).to.equal("seed");
     const seed = child.send.getCalls().map((c) => c.args[0]).find((m) => m.action === "seed");
@@ -315,11 +315,11 @@ describe("BitTorrent protocol handler", function () {
     const { handler, child } = await loadHandler();
     const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
 
-    const stopRes = await handler(new Request(apiQuery({ api: "stop", hash: HASH_HEX, token }), { method: "POST" }));
+    const stopRes = await handler(new Request(apiQuery({ api: "stop", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }));
     expect(stopRes.status).to.equal(200);
     expect((await jsonBody(stopRes)).stopped).to.equal(true);
 
-    const unseedRes = await handler(new Request(apiQuery({ api: "unseed", hash: HASH_HEX, token }), { method: "POST" }));
+    const unseedRes = await handler(new Request(apiQuery({ api: "unseed", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }));
     expect(unseedRes.status).to.equal(200);
     expect((await jsonBody(unseedRes)).mode).to.equal("download");
 
@@ -420,7 +420,7 @@ describe("BitTorrent protocol handler", function () {
       });
 
       const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
-      const res = await handler(new Request(apiQuery({ api: "resume", hash: HASH_HEX, token }), { method: "POST" }));
+      const res = await handler(new Request(apiQuery({ api: "resume", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }));
       expect(res.status).to.equal(200);
       expect((await jsonBody(res)).success).to.equal(true);
       expect(resumes).to.equal(1);
@@ -478,7 +478,7 @@ describe("BitTorrent protocol handler", function () {
       });
 
       const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
-      const res = await handler(new Request(apiQuery({ api: "resume", hash: HASH_HEX, token }), { method: "POST" }));
+      const res = await handler(new Request(apiQuery({ api: "resume", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }));
       expect(res.status).to.equal(200);
       expect(resumes).to.equal(1);
       const actions = child.send.getCalls().map((c) => c.args[0].action);
@@ -520,7 +520,7 @@ describe("BitTorrent protocol handler", function () {
 
     const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
     const res = await handler(
-      new Request(apiQuery({ api: "resume", hash: HASH_HEX, token }), { method: "POST" }),
+      new Request(apiQuery({ api: "resume", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }),
     );
     expect(res.status).to.equal(409);
     expect((await jsonBody(res)).error).to.include("Cannot resume while another torrent is actively seeding");
