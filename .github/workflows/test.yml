@@ -15,13 +15,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.19.0"
           cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run unit tests (p2p, extensions, security)a
+      - name: Run unit tests (p2p, extensions, security)
         run: npm run test:p2p && npm run test:extensions && npm run test:security
 
   e2e:
@@ -32,7 +32,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.19.0"
           cache: "npm"
 
       - name: Install dependencies
