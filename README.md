@@ -55,7 +55,7 @@
   - [x] `bittorrent://` / `bt://` / `magnet:` native URLs support
   - [x] Real-time download progress UI with pause/resume
   - [x] Auto-destroy torrent on completion (no seeding)
-  - [ ] 🚧 `bt://` website seeding and hosting
+  - [x] Optional `bt://` seeding
 
 - [x] Local `file://` browsing with P2P publishing:
   - [x] Custom `file://` support with privileged access
