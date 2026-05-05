@@ -1180,10 +1180,9 @@ class ExtensionManager {
     const extension = this.getExtensionByElectronId(electronId);
     if (!extension || extension.enabled !== true) return false;
 
-    const permissions = new Set([
-      ...(Array.isArray(extension.manifest?.permissions) ? extension.manifest.permissions : []),
-      ...(Array.isArray(extension.manifest?.optional_permissions) ? extension.manifest.optional_permissions : []),
-    ]);
+    const permissions = new Set(
+      Array.isArray(extension.manifest?.permissions) ? extension.manifest.permissions : []
+    );
 
     const scopedPermission = `p2pWrite:${String(scheme || "").toLowerCase()}`;
     return (
