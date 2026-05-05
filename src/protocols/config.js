@@ -10,12 +10,26 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("protocols:config");
 
-const fallbackUserData = process.env.PEERSKY_TEST_USERDATA || path.join(os.tmpdir(), "peersky-test-userdata");
-const app = (electron && typeof electron === "object" && electron.app && typeof electron.app.getPath === "function")
-  ? electron.app
-  : { getPath: () => fallbackUserData };
+function resolveUserDataPath() {
 
-const USER_DATA = app.getPath("userData");
+  if (process.env.PEERSKY_TEST_USERDATA) return process.env.PEERSKY_TEST_USERDATA;
+
+  const app = (electron && typeof electron === "object" && electron.app && typeof electron.app.getPath === "function")
+    ? electron.app
+    : null;
+
+  if (app) {
+    try {
+      return app.getPath("userData");
+    } catch (error) {
+      log.warn(`Falling back to temp userData path: ${error.message}`);
+    }
+  }
+
+  return path.join(os.tmpdir(), "peersky-test-userdata");
+}
+
+const USER_DATA = resolveUserDataPath();
 const DEFAULT_IPFS_DIR = path.join(USER_DATA, "ipfs");
 const BLOCKSTORE_PATH = path.join(DEFAULT_IPFS_DIR, "blocks");
 const DATASTORE_PATH = path.join(DEFAULT_IPFS_DIR, "datastore");
