@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run unit tests (p2p, extensions, security)
+      - name: Run unit tests (p2p, extensions, security)a
         run: npm run test:p2p && npm run test:extensions && npm run test:security
 
   e2e:

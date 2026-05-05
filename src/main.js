@@ -864,4 +864,5 @@ ipcMain.handle('check-built-in-engine', (event, template) => {
 });
 
 setupP2pmdPdfExportIpc();
+
 export { windowManager };
