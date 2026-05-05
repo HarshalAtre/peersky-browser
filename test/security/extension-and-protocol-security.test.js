@@ -10,22 +10,24 @@ describe("Protocol and extension security guardrails", function () {
   it("keeps P2P and peersky schemes fetch-enabled and webviews sandboxed", async function () {
     const mainJs = await readFile("src/main.js", "utf8");
 
-    expect(mainJs).to.include('supportFetchAPI: true');
-    expect(mainJs).to.include('sessionProtocol.handle("peersky"');
+    expect(mainJs).to.match(/supportFetchAPI\s*:\s*true/);
+    expect(mainJs).to.match(/sessionProtocol\.handle\(\s*["']peersky["']/);
     const hasIpfsRegistration =
-      mainJs.includes('sessionProtocol.handle("ipfs"') ||
-      mainJs.includes('sessionProtocol.registerStreamProtocol("ipfs"');
+      /sessionProtocol\.handle\(\s*["']ipfs["']/.test(mainJs) ||
+      /sessionProtocol\.registerStreamProtocol\(\s*["']ipfs["']/.test(mainJs);
     expect(hasIpfsRegistration).to.equal(true);
-    expect(mainJs).to.include('sessionProtocol.handle("hyper"');
+    expect(mainJs).to.match(/sessionProtocol\.handle\(\s*["']hyper["']/);
 
-    expect(mainJs).to.include("will-attach-webview");
-    expect(mainJs).to.include("webPreferences.nodeIntegration = false");
-    expect(mainJs).to.include("webPreferences.contextIsolation = true");
-    expect(mainJs).to.include("webPreferences.sandbox = true");
+    expect(mainJs).to.match(/will-attach-webview/);
+    expect(mainJs).to.match(/webPreferences\.nodeIntegration\s*=\s*false/);
+    expect(mainJs).to.match(/webPreferences\.contextIsolation\s*=\s*true/);
+    expect(mainJs).to.match(/webPreferences\.sandbox\s*=\s*true/);
 
     const ipfsHandlerJs = await readFile("src/protocols/ipfs-handler.js", "utf8");
-    expect(ipfsHandlerJs).to.include("enforceExtensionWritePolicy");
-    expect(mainJs).to.include("createIPFSHandler(ipfsOptions, session, { isExtensionWriteAllowed })");
+    expect(ipfsHandlerJs).to.match(/enforceExtensionWritePolicy/);
+    expect(mainJs).to.match(
+      /createIPFSHandler\(\s*ipfsOptions\s*,\s*session\s*,\s*\{\s*isExtensionWriteAllowed\s*\}\s*\)/
+    );
   });
 
   it("blocks extension writes to ipfs:// without permission and allows them with explicit grant", async function () {
@@ -109,9 +111,9 @@ describe("Protocol and extension security guardrails", function () {
   it("keeps extension API scoped and external pages minimal in preload", async function () {
     const preload = await readFile("src/pages/unified-preload.js", "utf8");
 
-    expect(preload).to.include("const isExtensions = url.startsWith('peersky://extensions')");
-    expect(preload).to.include("const isExternal = !isInternal");
-    expect(preload).to.include("extensions: extensionAPI");
-    expect(preload).to.include("External minimal API exposed (no settings access)");
+    expect(preload).to.match(/const\s+isExtensions\s*=\s*url\.startsWith\(\s*['"]peersky:\/\/extensions['"]\s*\)/);
+    expect(preload).to.match(/const\s+isExternal\s*=\s*!isInternal/);
+    expect(preload).to.match(/extensions\s*:\s*extensionAPI/);
+    expect(preload).to.match(/External minimal API exposed \(no settings access\)/);
   });
 });
