@@ -1,21 +1,36 @@
 import { expect } from "chai";
 import esmock from "esmock";
 import fs from "fs";
+import net from "net";
 import os from "os";
 import path from "path";
 import * as Y from "yjs";
 
 let activeConnections = null;
 
+async function getAvailablePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref?.();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((closeErr) => {
+        if (closeErr) reject(closeErr);
+        else resolve(Number(port));
+      });
+    });
+  });
+}
+
 class FakeHolesail {
   static rooms = new Map();
   static nextKey = 1;
-  static nextPort = 41000;
 
   static reset() {
     FakeHolesail.rooms.clear();
     FakeHolesail.nextKey = 1;
-    FakeHolesail.nextPort = 41000;
   }
 
   static urlParser(key) {
@@ -36,7 +51,7 @@ class FakeHolesail {
 
   async ready() {
     if (this.options.server) {
-      const port = Number(this.options.port || FakeHolesail.nextPort++);
+      const port = Number(this.options.port || await getAvailablePort());
       const key =
         typeof this.options.key === "string" && this.options.key.length > 0
           ? this.options.key
@@ -62,7 +77,7 @@ class FakeHolesail {
 
     if (this.options.client) {
       const entry = FakeHolesail.rooms.get(this.options.key);
-      const port = Number(this.options.port || entry?.port || FakeHolesail.nextPort++);
+      const port = Number(this.options.port || entry?.port || await getAvailablePort());
       this.info = {
         port,
         secure: this.options.secure ?? entry?.secure ?? false,
