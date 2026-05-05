@@ -748,7 +748,7 @@ export async function createHandler(ipfsOptions, session, securityOptions = {}) 
   };
 
   // Expose the node for integration tests (non-breaking; ignored in prod).
-  handler.__node = node;
+  if (process.env.NODE_ENV === "test") handler.__node = node;
 
   return handler;
 }
