@@ -10,7 +10,7 @@ import { createHandler as createHyperHandler } from "./protocols/hyper-handler.j
 import { createHandler as createHSHandler } from "./protocols/hs-handler.js";
 import { createHandler as createWeb3Handler } from "./protocols/web3-handler.js";
 import { createHandler as createFileHandler } from "./protocols/file-handler.js";
-import { createHandler as createBittorrentHandler, setupBittorrentIpc } from "./protocols/bittorrent-handler.js";
+import { createHandler as createBittorrentHandler, setupBittorrentIpc, shutdownBittorrent } from "./protocols/bittorrent-handler.js";
 import { ipfsOptions, hyperOptions } from "./protocols/config.js";
 import { createMenuTemplate } from "./actions.js";
 import WindowManager from "./window-manager.js";
@@ -338,6 +338,14 @@ app.on("before-quit", async (event) => {
   isQuitting = true; // Set the quitting flag
 
   windowManager.setQuitting(true); // Inform WindowManager that quitting is happening
+
+  // Shutdown BitTorrent — save state and kill worker before process exits
+  try {
+    shutdownBittorrent();
+    log.info("BitTorrent shutdown successfully");
+  } catch (error) {
+    log.error("Error shutting down BitTorrent:", error);
+  }
 
   // Shutdown extension system
   try {
