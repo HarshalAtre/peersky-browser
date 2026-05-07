@@ -1,10 +1,15 @@
 import { expect } from "chai";
 import sinon from "sinon";
 import esmock from "esmock";
+import { fork as forkProcess } from "child_process";
 import fs from "fs";
 import os from "os";
+import { fileURLToPath } from "url";
 import path from "path";
 import { EventEmitter } from "events";
+
+const _testDir = path.dirname(fileURLToPath(import.meta.url));
+const TRACKERS_JSON = path.join(_testDir, "../../src/protocols/bt/trackers.json");
 
 const HASH_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 const MAGNET = `magnet:?xt=urn:btih:${HASH_HEX}&dn=Test`;
@@ -68,7 +73,15 @@ function defaultWorkerReplies(proc) {
       return;
     }
     if (action === "stop") {
-      proc.emit("message", { id, type: "stopped", infoHash: msg.hash || HASH_HEX });
+      proc.emit("message", {
+        id,
+        type: "stopped",
+        infoHash: msg.hash || HASH_HEX,
+        magnetURI: MAGNET,
+        downloadSpeed: 0,
+        uploadSpeed: 0,
+        numPeers: 0,
+      });
       return;
     }
     if (action === "unseed") {
@@ -100,11 +113,35 @@ function apiQuery(parts) {
 describe("BitTorrent protocol handler", function () {
   this.timeout(20000);
 
+  const realSetInterval = global.setInterval;
+  const intervalHandles = [];
+  before(function () {
+    global.setInterval = function (fn, ms, ...rest) {
+      const handle = realSetInterval(fn, ms, ...rest);
+      // bittorrent-handler.js schedules a 30s crash-safety save interval.
+      if (ms === 30000) {
+        intervalHandles.push(handle);
+        if (handle && typeof handle.unref === "function") handle.unref();
+      }
+      return handle;
+    };
+  });
+  after(function () {
+    global.setInterval = realSetInterval;
+  });
+
   /** Dirs created by loadHandler when caller does not pass userDataDir / downloadsDir */
   const tmpDirs = [];
 
   afterEach(function () {
     sinon.restore();
+    while (intervalHandles.length) {
+      try {
+        clearInterval(intervalHandles.pop());
+      } catch {
+        /* ignore */
+      }
+    }
     while (tmpDirs.length) {
       const d = tmpDirs.pop();
       try {
@@ -298,6 +335,10 @@ describe("BitTorrent protocol handler", function () {
     const start = child.send.getCalls().map((c) => c.args[0]).find((m) => m.action === "start");
     expect(start.announce.length).to.be.greaterThan(0);
     expect(start.announce.join(",")).to.include("tracker.example.com");
+    const defaults = JSON.parse(fs.readFileSync(TRACKERS_JSON, "utf8"));
+    for (const tr of defaults) {
+      expect(start.announce).to.include(tr);
+    }
   });
 
   it("seed hits the worker with action seed", async () => {
@@ -488,6 +529,213 @@ describe("BitTorrent protocol handler", function () {
     }
   });
 
+  it("resume calls worker resume only when torrent exists (no start)", async () => {
+    const { handler, child } = await loadHandler();
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      magnetURI: MAGNET,
+      downloadPath: "/tmp",
+      paused: true,
+      done: false,
+      progress: 0.4,
+      downloaded: 100,
+      uploaded: 0,
+      downloadSpeed: 0,
+      uploadSpeed: 0,
+      numPeers: 0,
+      files: [],
+    });
+    const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+    const res = await handler(
+      new Request(apiQuery({ api: "resume", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }),
+    );
+    expect(res.status).to.equal(200);
+    expect(await jsonBody(res)).to.deep.include({ success: true, paused: false });
+    const actions = child.send.getCalls().map((c) => c.args[0].action);
+    expect(actions.filter((a) => a === "resume").length).to.equal(1);
+    expect(actions).to.not.include("start");
+
+    // The handler doesn't flip cache.paused on resume; it reflects the next worker status update.
+    const cachedBeforeUpdate = await jsonBody(await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX }))));
+    expect(cachedBeforeUpdate.paused).to.equal(true);
+
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      magnetURI: MAGNET,
+      downloadPath: "/tmp",
+      paused: false,
+      done: false,
+      progress: 0.4,
+      downloaded: 100,
+      uploaded: 0,
+      downloadSpeed: 1024,
+      uploadSpeed: 0,
+      numPeers: 2,
+      files: [],
+    });
+    const st = await jsonBody(await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX }))));
+    expect(st.paused).to.equal(false);
+  });
+
+  it("worker done bumps cache to done with speeds cleared", async () => {
+    const { handler, child } = await loadHandler();
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      name: "DoneSoon",
+      magnetURI: MAGNET,
+      downloadPath: "/tmp",
+      paused: false,
+      done: false,
+      progress: 0.99,
+      downloaded: 999,
+      uploaded: 0,
+      downloadSpeed: 5000,
+      uploadSpeed: 0,
+      numPeers: 3,
+      files: [],
+    });
+    child.emit("message", { type: "done", infoHash: HASH_HEX });
+    const st = await jsonBody(await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX }))));
+    expect(st.done).to.equal(true);
+    expect(st.downloadSpeed).to.equal(0);
+    expect(st.uploadSpeed).to.equal(0);
+  });
+
+  it("status passes through seeding fields from worker updates", async () => {
+    const { handler, child } = await loadHandler();
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      name: "SeedBox",
+      magnetURI: MAGNET,
+      downloadPath: "/tmp",
+      mode: "seed",
+      isSeeding: true,
+      paused: false,
+      done: true,
+      progress: 1,
+      downloaded: 1000,
+      uploaded: 400,
+      downloadSpeed: 0,
+      uploadSpeed: 8192,
+      numPeers: 5,
+      seedingSince: Date.now() - 5000,
+      files: [],
+    });
+    const st = await jsonBody(await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX }))));
+    expect(st.mode).to.equal("seed");
+    expect(st.isSeeding).to.equal(true);
+    expect(st.uploadSpeed).to.be.above(0);
+  });
+
+  it("stop clears speeds and flags in cached status", async () => {
+    const { handler, child } = await loadHandler();
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      magnetURI: MAGNET,
+      downloadPath: "/tmp",
+      paused: false,
+      stopped: false,
+      done: false,
+      progress: 0.5,
+      downloaded: 50,
+      uploaded: 0,
+      downloadSpeed: 3000,
+      uploadSpeed: 0,
+      numPeers: 4,
+      files: [],
+    });
+    const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+    const stopRes = await handler(
+      new Request(apiQuery({ api: "stop", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }),
+    );
+    expect(stopRes.status).to.equal(200);
+
+    const st = await jsonBody(await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX }))));
+    expect(st.stopped).to.equal(true);
+    expect(st.paused).to.equal(true);
+    expect(st.isSeeding).to.equal(false);
+    expect(st.downloadSpeed).to.equal(0);
+    expect(st.uploadSpeed).to.equal(0);
+    expect(st.numPeers).to.equal(0);
+  });
+
+  it("unseed zeros upload and marks cache as download + paused", async () => {
+    const { handler, child } = await loadHandler();
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      magnetURI: MAGNET,
+      downloadPath: "/tmp",
+      mode: "seed",
+      isSeeding: true,
+      paused: false,
+      done: true,
+      progress: 1,
+      downloaded: 100,
+      uploaded: 50,
+      downloadSpeed: 0,
+      uploadSpeed: 16000,
+      numPeers: 8,
+      files: [],
+    });
+    const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+    const unseedRes = await handler(
+      new Request(apiQuery({ api: "unseed", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }),
+    );
+    expect(unseedRes.status).to.equal(200);
+
+    const st = await jsonBody(await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX }))));
+    expect(st.mode).to.equal("download");
+    expect(st.isSeeding).to.equal(false);
+    expect(st.paused).to.equal(true);
+    expect(st.uploadSpeed).to.equal(0);
+    expect(st.numPeers).to.equal(0);
+  });
+
+  it("remove drops torrent data from disk when cache has a named folder", async () => {
+    const dd = fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-rm-"));
+    const tname = "RmTorFolder";
+    fs.mkdirSync(path.join(dd, tname), { recursive: true });
+    fs.writeFileSync(path.join(dd, tname, "keep-me.txt"), "data", "utf8");
+
+    try {
+      const { handler, child } = await loadHandler({ downloadsDir: dd });
+      child.emit("message", {
+        type: "status-update",
+        infoHash: HASH_HEX,
+        name: tname,
+        magnetURI: MAGNET,
+        downloadPath: dd,
+        paused: true,
+        done: true,
+        progress: 1,
+        downloaded: 4,
+        uploaded: 0,
+        downloadSpeed: 0,
+        uploadSpeed: 0,
+        numPeers: 0,
+        files: [{ index: 0, name: "keep-me.txt", path: "keep-me.txt", length: 4, downloaded: 4, progress: 1 }],
+      });
+
+      const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+      const rmRes = await handler(
+        new Request(apiQuery({ api: "remove", hash: HASH_HEX }), { method: "POST", headers: { "X-BT-Token": token } }),
+      );
+      expect(rmRes.status).to.equal(200);
+      expect((await jsonBody(rmRes)).removed).to.equal(true);
+
+      expect(fs.existsSync(path.join(dd, tname))).to.equal(false);
+      expect((await handler(new Request(apiQuery({ api: "status", hash: HASH_HEX })))).status).to.equal(404);
+    } finally {
+      fs.rmSync(dd, { recursive: true, force: true });
+    }
+  });
+
   it("resume from cache returns 409 when another torrent is actively seeding", async () => {
     const { handler, child } = await loadHandler({
       replyAs(proc) {
@@ -531,5 +779,174 @@ describe("BitTorrent protocol handler", function () {
     const { handler } = await loadHandler();
     const html = await (await handler(new Request(`bt://${b32}/`))).text();
     expect(html).to.include("magnet:?xt=urn:btih:");
+  });
+});
+
+describe("BitTorrent worker lifecycle", function () {
+  this.timeout(20000);
+
+  function fakeWebTorrentModuleSource() {
+    return `
+import { EventEmitter } from "events";
+
+function btihFromMagnet(uri) {
+  const m = String(uri).match(/btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
+  return m ? m[1].toLowerCase() : "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+}
+
+class FakeTorrent extends EventEmitter {
+  constructor(magnetURI) {
+    super();
+    this.magnetURI = magnetURI;
+    this.infoHash = btihFromMagnet(magnetURI);
+    this.name = "FakeTorrent";
+    this.length = 1024 * 1024;
+    this.files = [{ name: "file.txt", path: "file.txt", length: 3, downloaded: 0, progress: 0 }];
+    this.wires = [];
+    this.pieces = [0];
+    this.progress = 0.5;
+    this.downloaded = 1;
+    this.uploaded = 0;
+    this.downloadSpeed = 1234;
+    this.uploadSpeed = 0;
+    this.ratio = 0;
+    this.numPeers = 0;
+    this.timeRemaining = 0;
+    this.done = false;
+    this.paused = false;
+  }
+
+  pause() { this.paused = true; }
+  resume() { this.paused = false; }
+  deselect() {}
+
+  destroy(_opts, cb) {
+    if (process.send) process.send({ type: "fake-destroy", infoHash: this.infoHash });
+    if (typeof cb === "function") cb();
+  }
+}
+
+export default class FakeWebTorrent extends EventEmitter {
+  constructor() {
+    super();
+    this.torrents = [];
+  }
+
+  async get(hash) {
+    return this.torrents.find((t) => t.infoHash === hash) || null;
+  }
+
+  add(magnetURI) {
+    const t = new FakeTorrent(magnetURI);
+    this.torrents.push(t);
+
+    queueMicrotask(() => {
+      // Complete after worker attaches listeners.
+      t.done = true;
+      t.progress = 1;
+      t.downloadSpeed = 0;
+      t.emit("done");
+    });
+
+    return t;
+  }
+
+  destroy(cb) {
+    this.torrents = [];
+    if (typeof cb === "function") cb();
+  }
+}
+`;
+  }
+
+  async function withTempWorker(run) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-worker-test-"));
+    const dl = fs.mkdtempSync(path.join(os.tmpdir(), "peersky-bt-worker-dl-"));
+
+    const workerSrcPath = path.join(_testDir, "../../src/protocols/bt/worker.js");
+    const workerOutPath = path.join(tmp, "worker.js");
+    fs.writeFileSync(workerOutPath, fs.readFileSync(workerSrcPath, "utf8"), "utf8");
+
+    const nm = path.join(tmp, "node_modules", "webtorrent");
+    fs.mkdirSync(nm, { recursive: true });
+    fs.writeFileSync(
+      path.join(nm, "package.json"),
+      JSON.stringify({ name: "webtorrent", version: "0.0.0", type: "module", exports: "./index.js" }, null, 2),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(nm, "index.js"), fakeWebTorrentModuleSource(), "utf8");
+
+    const child = forkProcess(workerOutPath, [dl], {
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+      silent: true,
+    });
+
+    try {
+      await run(child);
+    } finally {
+      try { child.disconnect(); } catch {}
+      try { child.kill("SIGTERM"); } catch {}
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(dl, { recursive: true, force: true });
+    }
+  }
+
+  function waitForMessage(child, predicate, timeoutMs = 2500) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out waiting for worker message"));
+      }, timeoutMs);
+      function onMsg(msg) {
+        if (predicate(msg)) {
+          cleanup();
+          resolve(msg);
+        }
+      }
+      function cleanup() {
+        clearTimeout(timer);
+        child.off("message", onMsg);
+      }
+      child.on("message", onMsg);
+    });
+  }
+
+  it("download completion emits done and destroys torrent (no seeding)", async () => {
+    await withTempWorker(async (child) => {
+      await waitForMessage(child, (m) => m && m.type === "ready");
+
+      child.send({ id: 1, action: "start", magnetUri: MAGNET, announce: [] });
+
+      const done = await waitForMessage(child, (m) => m && m.type === "done" && m.infoHash === HASH_HEX);
+      expect(done.infoHash).to.equal(HASH_HEX);
+
+      const destroyed = await waitForMessage(child, (m) => m && m.type === "fake-destroy" && m.infoHash === HASH_HEX);
+      expect(destroyed.infoHash).to.equal(HASH_HEX);
+    });
+  });
+
+  it("seed completion keeps seeding and does not emit done", async () => {
+    await withTempWorker(async (child) => {
+      await waitForMessage(child, (m) => m && m.type === "ready");
+
+      child.send({ id: 1, action: "seed", magnetUri: MAGNET, announce: [] });
+
+      const status = await waitForMessage(child, (m) => m && m.type === "status-update" && m.infoHash === HASH_HEX);
+      expect(status.mode).to.equal("seed");
+      expect(status.isSeeding).to.equal(true);
+
+      let sawDone = false;
+      let sawDestroy = false;
+      const onMsg = (m) => {
+        if (m && m.type === "done") sawDone = true;
+        if (m && m.type === "fake-destroy") sawDestroy = true;
+      };
+      child.on("message", onMsg);
+      await new Promise((r) => setTimeout(r, 200));
+      child.off("message", onMsg);
+
+      expect(sawDone).to.equal(false);
+      expect(sawDestroy).to.equal(false);
+    });
   });
 });
