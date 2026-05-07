@@ -24,6 +24,20 @@ function emitResult(payload) {
   console.log(`${RESULT_PREFIX}${JSON.stringify(payload)}`);
 }
 
+async function withTimeout(taskPromise, timeoutMs, label) {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([taskPromise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function getProbeExtension() {
   const all = Array.from(extensionManager.loadedExtensions.values());
   return all.find((ext) => ext && (ext.name === "p2p-probe-extension" || ext.displayName === "p2p-probe-extension"));
@@ -70,8 +84,16 @@ async function runProbePage(extensionId) {
   });
 
   try {
-    await win.loadURL(`chrome-extension://${extensionId}/probe.html`);
-    const result = await win.webContents.executeJavaScript("window.__runProbe && window.__runProbe()", true);
+    await withTimeout(
+      win.loadURL(`chrome-extension://${extensionId}/probe.html`),
+      20000,
+      "probe page load",
+    );
+    const result = await withTimeout(
+      win.webContents.executeJavaScript("window.__runProbe && window.__runProbe()", true),
+      30000,
+      "probe page script",
+    );
     return result;
   } finally {
     if (!win.isDestroyed()) {
@@ -123,13 +145,16 @@ app.commandLine.appendSwitch("disable-gpu");
 
 const args = parseArgs(process.argv.slice(2));
 
+if (args.userData) {
+  // Electron expects userData overrides before "ready" to avoid default-path races.
+  app.setPath("userData", path.resolve(args.userData));
+}
+
 app.whenReady().then(async () => {
   try {
     if (!args.userData || !args.fixture) {
       throw new Error("Missing required --user-data or --fixture argument");
     }
-
-    app.setPath("userData", path.resolve(args.userData));
 
     const browserSession = session.defaultSession;
     await ensureTestProtocols(browserSession);
