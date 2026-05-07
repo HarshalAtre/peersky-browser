@@ -10,8 +10,7 @@ on:
       - "release/**"
 
 jobs:
-  unit:
-    name: Unit (${{ matrix.os }})
+  test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -31,53 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run unit suites
-        run: npm run test:p2p && npm run test:extensions && npm run test:security
+      - name: Run test suites
+        run: npm run test:p2p && npm run test:p2p:e2e && npm run test:extensions && npm run test:security
 
-  e2e:
-    name: E2E (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run e2e suite
-        run: npm run test:p2p:e2e
-
-  integration:
-    name: Integration (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run integration suite
+      - name: Run integration test (Windows/macOS)
+        if: ${{ !startsWith(matrix.os, 'ubuntu') }}
         run: npm run test:integration
