@@ -29,6 +29,8 @@ import { getBrowserSession, usePersist } from "./session.js";
 import { setupPermissionHandler } from "./permissions.js";
 import { setupP2pmdPdfExportIpc } from "./pages/p2p/p2pmd/pdf-export-ipc.js";
 
+const log = createLogger('main');
+
 const P2P_PROTOCOL = {
   standard: true,
   secure: true,
@@ -77,8 +79,6 @@ const MAGNET_PROTOCOL = {
   bypassCSP: false,
   corsEnabled: true,
 };
-
-const log = createLogger('main');
 
 let windowManager = null;
 
@@ -870,5 +870,15 @@ ipcMain.handle('check-built-in-engine', (event, template) => {
 });
 
 setupP2pmdPdfExportIpc();
+
+// Suppress the libp2p/utils queue stack-overflow that fires when the
+// kad-DHT reprovider runs. Without this Electron shows a blocking dialog.
+process.on('uncaughtException', (error) => {
+  if (error instanceof RangeError && error.message === 'Maximum call stack size exceeded') {
+    log.warn('[main] Caught libp2p queue stack overflow (reprovider) — suppressed');
+    return;
+  }
+  log.error('[main] Uncaught exception:', error);
+});
 
 export { windowManager };
