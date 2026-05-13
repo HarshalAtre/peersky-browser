@@ -492,7 +492,7 @@ describe("IPFS protocol handler", function () {
   });
 
 
-  it("dispatches Qmâ€¦ (base58btc) IPNS name to peerIdFromString via ENS ipns-ns", async function () {
+  it("dispatches Qm… (base58btc) IPNS name to peerIdFromString via ENS ipns-ns", async function () {
     const peerIdFromStringSpy = sinon.stub().returns({
       bytes: new Uint8Array([1]),
       toBytes: () => new Uint8Array([1]),
